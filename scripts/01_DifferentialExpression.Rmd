@@ -1,24 +1,183 @@
 ---
-title: "Exploratory and statistical analysis of RNA-seq data using DESeq2"
-author: "Michael Love"
-date: "June 2017"
-abstract: "This workflow covers basic steps in an exploratory and statistical analysis of RNA-seq data, from import of Salmon quantifications, to performing differential gene expression and looking up annotation information about significant genes. The experimental data consists of control and virus treated human airway epithelial samples from 6 asthmatic and 6 non-asthmatic individuals, where a given individual has both a control (Vehicle) and treated (HRV, human rhinovirus) sample."
+title: "Differential expression analysis"
 output:
-  html_document:
-    toc: true
-    toc_float: true
+  html_document: default
 ---
 
-```{r echo=FALSE}
-library(knitr)
-opts_chunk$set(cache=TRUE, fig.width=5, fig.height=5)
+This tutorial is a compilation of tutorials from Sean Davis and Mike Love, with some modifications and additions to fit the objectives of this workshop.
+
+```{r intro, echo=FALSE}
+library(printr)
 ```
+
+## The data
+
+The data for this exercise are described in [Phenotypic responses of differentiated asthmatic human airway epithelial cultures to rhinovirus.", PLoS One, 2015 Feb 23;10(2):e0118286](https://www.ncbi.nlm.nih.gov/pubmed/25706956). 
+
+> OBJECTIVES: Human airway epithelial cells are the principal target of human rhinovirus (HRV), a common cold pathogen that triggers the majority of asthma exacerbations. The objectives of this study were 1) to evaluate an in vitro air liquid interface cultured human airway epithelial cell model for HRV infection, and 2) to identify gene expression patterns associated with asthma intrinsically and/or after HRV infection using this model.
+>
+> METHODS: Air-liquid interface (ALI) human airway epithelial cell cultures were prepared from 6 asthmatic and 6 non-asthmatic donors. The effects of rhinovirus RV-A16 on ALI cultures were compared. Genome-wide gene expression changes in ALI cultures following HRV infection at 24 hours post exposure were further analyzed using RNA-seq technology. Cellular gene expression and cytokine/chemokine secretion were further evaluated by qPCR and a Luminex-based protein assay, respectively.
+>
+> MAIN RESULTS: ALI cultures were readily infected by HRV. RNA-seq analysis of HRV infected ALI cultures identified sets of genes associated with asthma specific viral responses. These genes are related to inflammatory pathways, epithelial structure and remodeling and cilium assembly and function, including those described previously (e.g. CCL5, CXCL10 and CX3CL1, MUC5AC, CDHR3), and novel ones that were identified for the first time in this study (e.g. CCRL1).
+>
+> CONCLUSIONS: ALI-cultured human airway epithelial cells challenged with HRV are a useful translational model for the study of HRV-induced responses in airway epithelial cells, given that gene expression profile using this model largely recapitulates some important patterns of gene responses in patients during clinical HRV infection. Furthermore, our data emphasize that both abnormal airway epithelial structure and inflammatory signaling are two important asthma signatures, which can be further exacerbated by HRV infection.
+
+# Note on R package installations
+
+If you get an error that says "there is no package called ‘NameOfPackage’", it means that don't have it installed and thus need to install that R package. You can do that by running the following lines of code (that uses as example the package "DESeq2")
+
+```{r packageInstallation, eval=FALSE}
+source("http://bioconductor.org/biocLite.R")
+biocLite("DESeq2")
+```
+
+# Downloading data
+
+We will use a publicly available dataset. This tutorial includes the process of how to download fastq files available through the Short Read Archive. The Short Read Archive is a database that contains sequencing data used in any publication. For most journals, it is a requirement to deposit any sequencing data used when submitting a paper for publication. When working with your own data, you would typically get fastq files from your sequencing facility.
+
+## Reference files
+
+We will be using the [Gencode reference transcripts](https://www.gencodegenes.org/releases/26.html) for this workflow. Since we are using an alignment-free quantification procedure, we will need the fasta files representing all transcripts and a GTF file for identifying which transcript isoforms go with which genes. Normally, you would use the website to identify the correct files and the download can be done with R using the following commands:
+
+```{r}
+download.file('ftp://ftp.sanger.ac.uk/pub/gencode/Gencode_human/release_26/gencode.v26.transcripts.fa.gz',destfile = "gencode.v26.transcripts.fa.gz",quiet = TRUE)
+download.file('ftp://ftp.sanger.ac.uk/pub/gencode/Gencode_human/release_26/gencode.v26.chr_patch_hapl_scaff.annotation.gtf.gz',destfile = "gencode.v26.chr_patch_hapl_scaff.annotation.gtf.gz", quiet=TRUE)
+```
+
+
+## Raw reads (fastq)
+
+The details on the data for this exercise are available from the [NCBI SRA here][RunTable]. The results from the SRA website were extracted and are available in the table below.  
+
+```{r}
+sra_run_table <- read.table('../data/SraRunTable.txt', sep = "\t", header = TRUE)
+sra_run_table
+```
+
+However, the SRA data are stored in a proprietary format, so a [specific SRA toolkit][SRAToolkit] is necessary to get and the extract the data to FASTQ files. Here, we are going to use the SRA toolkit command `fastq-dump` to generate the fastq files (paired-end) for later mapping. 
+
+The following function:
+
+1. Constructs the command-line that we need as a string, called `cmdline`
+2. Uses `system()` to call the command-line and run the command. Each SRA "Run" accession contains the fastq information for one sample. 
+
+```{r}
+extractSRA <- function(sra_accession,
+                       exe_path = 'fastq-dump',
+                       args = '--split-files --gzip',
+                       outdir = 'fastq',
+                       dry_run = FALSE) 
+  {
+    cmdline = sprintf('%s %s --outdir %s %s', exe_path, args, outdir, sra_accession)
+    if(dry_run) {
+      message("will run with this command line:\n",cmdline)
+    } else {
+      return(system(cmdline))
+    }
+  }
+```
+
+To give the function a try, we can execute the function as a "dry run", which will only give us the resulting command line, but will not have the computer execute it.
+
+```{r}
+extractSRA(sra_run_table$Run_s[1], dry_run = TRUE)
+```
+
+If we wanted to do run this for several samples at once and in parallel, we can use the `BiocParallel` package.
+
+```{r}
+library(BiocParallel)
+```
+
+The code below "registers" four "workers" and then extracts the first four samples worth of fastq files *at the same time*, or in parallel. Note that bplapply works very similarly to lapply except that the work is done in chunks of four at a time (or whatever the number of workers is). To keep things fast, we pass the parameter `-X 10000` to `fastq-dump` to generate only 10000 reads for each fastq file. 
+
+```{r extractFASTQ,eval=FALSE,}
+register(MulticoreParam(multicoreWorkers()*2))
+res = bplapply(sra_run_table$Run_s, extractSRA, 
+               args = "--split-files --gzip -X 10000", outdir = "fake_fastq")
+```
+
+So, if you now look in the "fake_fastq" directory, you'll see 48 files representing the forward and reverse reads for each of our 24 samples.
+
+```{r}
+head(dir('fake_fastq'))
+```
+
+# Quantifying RNA-seq with Salmon
+
+Quantification with `salmon` is a two-step process. With other softwares, there may be more steps involved. Also, speed and output formats will generally vary quite a bit from one software to the next.
+
+1. Generate an "index" from the transcript sequences. This need only be done once.
+2. For each sample, run `salmon` in "quant" mode, specifying the correct index and fastq files for one sample. This step is run once for each sample.
+
+## Creating the salmon index
+
+Use the salmon software to first [create the index](http://salmon.readthedocs.io/en/latest/salmon.html#quasi-mapping-based-mode-including-lightweight-alignment) necessary before quantification.
+
+```
+# this needs to be typed into the command-line,
+# not into R.
+# 
+# Use the salmon help (salmon index --help) to determing
+# what the next line does.
+salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 4
+```
+
+If we want to do the same thing directly from R, we simply need to wrap  the command lines in `system()`.
+
+```{r eval=FALSE}
+system("salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 4")
+```
+
+## Quantifying using salmon
+
+Now, we can run salmon for the 24 samples of our experiment. Note that, for illustration purposes, we are running our quantifications using fastq files that contain only 10,000 reads. Thus the results of the quantifications will probably not representative of the whole dataset. However, the quantifications using the whole dataset are already available in the directory named 'data' of this repository. 
+
+Below is a wrapper function in which we provide three parameters: a sample name, the indexed transcriptome generated in the previous step and an output directory. This wrapper will construct the call to salmon, which we pass to the linux terminal using the command `system`.
+
+```{r}
+salmon_quant <- function(samplename, index, fastqdir = 'fake_fastq') {
+  cmdline = sprintf("salmon quant -i %s -1 %s/%s_1.fastq.gz -2 %s/%s_2.fastq.gz -l A -o %s/%s",
+                    index, fastqdir, samplename, fastqdir, samplename, fastqdir, samplename)
+  message(sprintf("running: %s\n", cmdline))
+  system(cmdline)
+}
+```
+
+Now, we can run the first sample.
+
+```{r eval=FALSE}
+salmon_quant('SRR1565929', "gencode.v26", 'fake_fastq')
+```
+
+To generalize this for all our samples, we will need to create a loop to run the `salmon_quant` function for each file.
+
+```{r eval=FALSE}
+for(run in sra_run_table$Run_s) {
+  message("starting: ", run)
+  salmon_quant(run, 'gencode.v26', "fake_fastq")
+  message("finishing: ", run)
+}
+```
+
+You will see that in the "fake_fastq" directory, there is one new directory for each sample, containing the results of the quantification step. Below, we are reading one of these files into our R session and exploring the first elements of it. Notice that there is an unusually high number of low  counts: this is because we only used a very small subset of the data!
+
+```{r salmonResults, eval=FALSE}
+dat = read.table('fake_fastq/SRR1565929/quant.sf')
+head(dat)
+```
+
+Take a look at the [output files section](http://salmon.readthedocs.io/en/latest/file_formats.html#fileformats) of the salmon documentation. Then, look in the various sample directories. In particular, the quant.sf.gz files (one per sample) represent the transcript-level counts.
 
 # Importing Salmon quant files
 
-We begin this workflow by importing Salmon quantifications which are 
-included in this repository under `data/quant`. Relative to the `scripts` 
-directory, we can see we have quantifications for 24 samples:
+We will now import the Salmon quantifications into our R session. Note that we won't be
+using the quantifications from our previous steps, since these don't
+include all the reads from the data. Instead, we will be using the quantifications that are 
+included in this repository under `data/quant`, which were done using the
+whole data.
+
+Relative to the `scripts` directory, the `real` quantifications can be found by typing:
 
 ```{r}
 list.files("../data/quant/")
@@ -30,14 +189,13 @@ The layout of a single sample's quantification directory
 list.files("../data/quant/SRR1565926")
 ```
 
-We will read in a table we created from the SRA website, which
-gives some of the sample information. We call this table `coldata`,
+We will refer to the table we created from the SRA website, which
+gives some of the sample information. We rename this table to `coldata`,
 because it provides data about the *columns* of the count matrix
 we will be assembling.
 
 ```{r}
-library(readr)
-coldata <- read_delim("../data/SraRunTable.txt", delim="\t")
+coldata <- sra_run_table
 coldata
 ```
 
@@ -51,7 +209,7 @@ names(files) <- coldata$Run_s
 head(files,2)
 ```
 
-The following code (not evaluated here) can be used to generate a table
+The following code is used to generate a table
 that connects transcripts to genes for summarizing Salmon transcript
 quantifications for differential gene expression. We simply
 read in the GTF file from the same database that we used for building
@@ -59,10 +217,9 @@ the Salmon index (in this case, Gencode version 26), and then pull
 out a table with the transcript name for every gene.
 
 ```{r eval=FALSE}
-# ftp://ftp.sanger.ac.uk/pub/gencode/Gencode_human/release_26/gencode.v26.annotation.gtf.gz
 library(GenomicFeatures)
-txdb <- makeTxDbFromGFF("gencode.v26.annotation.gtf.gz")
-saveDb(txdb, file="gencode.v26.sqlite")
+txdb <- makeTxDbFromGFF("gencode.v26.chr_patch_hapl_scaff.annotation.gtf.gz")
+#saveDb(txdb, file="gencode.v26.sqlite")
 # next time you can just load with this line (no need to makeTxDb...)
 # txdb <- loadDb("gencode.v26.sqlite") 
 columns(txdb)
@@ -71,10 +228,9 @@ res <- AnnotationDbi::select(txdb, k, "TXNAME", "GENEID")
 tx2gene <- res[,2:1]
 ```
 	
-We have prepared this table in advance, and now load it:
-	
+We explore the first lines of this object:
+
 ```{r}
-load("../data/tx2gene.rda")
 head(tx2gene)
 ```
 
@@ -130,6 +286,7 @@ We can therefore bring in the sample names from GEO, line them up with
 our coldata, and extract the subject ID information:
 
 ```{r}
+library(readr)
 geo <- read_delim("../data/GEO_table.txt", delim="\t", col_names=FALSE)
 head(geo)
 coldata$title <- geo$X2[match(coldata$Sample_Name_s, geo$X1)]
@@ -196,6 +353,22 @@ dds$condition
 dds$treatment
 ```
 
+# Parenthesis: downloading data from recount2
+
+So far, we have seen how to go from raw fastq files to a `DESeqDataSet`, which is the object used for further analysis. As a brief parenthesis, recount2 is project in which the authors have processed more than 70,000 publicly available datasets and provide an R interphase to access them. For example, we can download processed data for our 24 samples using only a few lines of code:
+
+```{r recount2}
+library(recount)
+studyID <- levels( coldata$SRA_Study_s )
+download_study(studyID, type = "rse-gene")
+load("SRP046226/rse_gene.RData")
+as(rse_gene, "DESeqDataSet")
+```
+
+In a few lines of code, instead of all the previous lines of this tutorial, we have downloaded and generated a `DESeqDataSet` object that is ready to be analyzed. Of note, recount2 uses an alignment-based quantification approach that is different to the one we have been doing through this tutorial. If you are working with public data, it is likely that recount will save you months of work.
+
+Closing parenthesis!
+
 # Exploratory data analysis
 
 Already, we can take a look at how the samples related to each other.
@@ -203,8 +376,7 @@ In DESeq2, we have special functions for transforming the counts,
 so that they can be easily visualized (we will not transform the counts, 
 but use the raw counts later, for statistical testing).
 
-My favorite of these transformation is the `vst`, mostly because it is 
-very fast, and provides transformed (nearly log-scale) data which is
+`vst` is a fast function that provides transformed (nearly log-scale) data which is
 robust to many problems associated with log-transformed data (for more details,
 see the DESeq2 
 [workflow ](http://www.bioconductor.org/help/workflows/rnaseqGene/#the-rlog-and-variance-stabilizing-transformations)
@@ -471,282 +643,6 @@ plotCounts(dds, target.map[2], c("condition","treatment"))
 plotCounts(dds, target.map[2], c("condition","treatment"), transform=FALSE)
 ```
 
-# Interlude: power analysis
-
-With your standard t-test or linear regression on a one dimensional *Y*, 
-performing a post-hoc power analysis doesn't make sense, because the observed effect
-size and variance estimate functionally determine the estimated power just as 
-they do the observed p-value. In other words, it's entirely 
-circular to show that with a standard power analysis formula,
-using the post-hoc observed effect size and variance, it will say 
-the experiment was "under-powered", if you have an observed 
-p-value above your critical threshold (and the converse). 
-It makes more sense to perform power analyses for a range of effect sizes, 
-and using your best estimate of within-group variance.
-
-Here we will do something a little different, we will assess via 
-simulation what range of effect sizes and count ranges would have
-been significant, given the observed variance of counts.
-We will work with a value called *dispersion* which links
-the variance to the mean in a negative binomial distribution 
-(this is the distribution used to model counts in DESeq2).
-Roughly, the dispersion is the square of the coefficient of
-variation of counts. So dipersion of 0.01 implies that the counts
-might vary by about 10% around their mean value.
-
-```{r}
-sqrt(.01)
-```
-
-DESeq2 estimates dispersion values for each gene, first a 
-*maximum likelihood value*, and then a *maximum posterior* value.
-For full details, you can take a look at the 
-[DESeq2 paper](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0550-8), 
-but briefly, the maximum likelihood value just looks at the data for a single
-gene, while the maximum posterior value integrates the information
-from the individual gene with the information about all the genes.
-If the maximum likelihood estimate for a single gene 
-differs greatly from the estimates of the majority of the other genes,
-that gene's estimate will be "pulled in" or "shrunk" towards the estimates 
-of the others. It's not shrunk all the way, and the amount is determined
-by a formula called *Bayes formula*. It can be shown that these posterior
-estimates have less error overall than the maximum likelihood estimates,
-if we structure the formula in the right way. They end up preventing
-a lot of false positives, where we might by chance have a 
-too-small dispersion estimate for some genes, in particular when 
-the sample sizes are small.
-
-Here we can plot the dispersion estimates for this dataset.
-The black points are the maximum likelihood estimates ("gene-est"),
-and the blue points are the maximum posterior estimates ("final").
-
-```{r plotdisp}
-plotDispEsts(dds, ylim=c(1e-4,10))
-```
-
-We can extract information about how the trend and how the values 
-clustered around the trend. We will write an R function
-that takes in a mean normalized count, and outputs
-a plausible dispersion value for this dataset.
-The `.05` and `2.06` come from the coefficients for the red line,
-and the `.28` comes from determining how far the true dispersion values
-are spread around the red line. It's less than the black points,
-as the spread of the black points represents dispersion differences 
-across genes *and* sampling variance.
-
-The `.05` *asymptotic dispersion* means that the counts
-vary by about 22% of their expected value, when the counts are high.
-
-```{r}
-dispersionFunction(dds)
-dmr <- function(x) (.05 + 2.06 / x) * exp(rnorm(length(x),0,.28))
-```
-
-This is what our `dmr` function returns, when we
-feed in the mean of normalized counts from the dataset.
-
-```{r simdisp}
-baseMean <- mcols(dds)$baseMean
-plot(baseMean, dmr(baseMean), log="xy", ylim=c(1e-4,10))
-```
-
-We can see what the mean and standard deviation
-of the log2 of mean counts was. Note that this
-experiment had much lower sequencing depth than 
-is typical for a human RNA-seq dataset. Typically, 
-total counts of 20-40 million are common. This
-dataset has about 1/10 of that. The mean count is about
-`2^5` or 32.
-
-```{r}
-mean(log2(baseMean))
-sd(log2(baseMean))
-```
-
-There is a function in DESeq2 to simulate a dataset
-according to parameters estimated from another dataset.
-Note that, while the previous experiment had a complex
-design structure including control for subject and condition,
-here we just simulate a two group analysis for
-simplicity. We simulate 10,000 genes with 12 samples across two groups,
-and supposing that the true log2 fold changes are centered at 
-0 with a standard deviation of 1. This means that fold changes
-of 1/2 or 2 are common. This will allow us to see how high
-the fold changes will need to be to end up in the set of
-differentially expressed genes.
-
-```{r}
-set.seed(1)
-sim <- makeExampleDESeqDataSet(n=10000, m=12,
-                               betaSD=1,
-                               interceptMean=5,
-                               interceptSD=2,
-                               dispMeanRel=dmr)
-keep <- rowSums(counts(sim) >= 10) >= 3
-table(keep)
-sim <- sim[keep,]
-sim <- DESeq(sim)
-sim.res <- results(sim, independentFiltering=FALSE, cooksCutoff=FALSE)
-```
-
-We can plot the MA plot from our data, with the simulated data 
-side-by-side. With the caveat that the experimental designs are 
-not the same, in the simulated data we can see that large fold
-changes are detected as differentially expressed at 10% FDR,
-and that this depends on the mean count value. For the smallest 
-mean count genes, the fold change needs to be larger for
-the gene to end up in the significant set.
-
-```{r compma, fig.width=8, fig.height=5}
-par(mfrow=c(1,2))
-plotMA(res, xlim=c(1,1e6), ylim=c(-5,5))
-plotMA(sim.res, xlim=c(1,1e6), ylim=c(-5,5))
-```
-
-We can use `dplyr` and `ggplot2` to perform a more in depth
-comparison of the power at various levels of effect size (log2 fold change)
-and mean count. Because we simulated the data, we can use
-the true log2 fold change and true mean value for the "control"
-group, in order to classify the genes into bins.
-
-```{r}
-max.lfc <- ceiling(max(abs(mcols(sim)$trueBeta)))
-sim.dat <- data.frame(sig=sim.res$padj < .1,
-                      mean=cut(2^mcols(sim)$trueIntercept,c(0,10,100,1000,1e5)),
-                      abs.LFC=cut(abs(mcols(sim)$trueBeta),c(0,.25,.5,1,max.lfc)))
-```
-
-We group the genes by the mean value and absolute fold change, and calculate the
-statistical power in terms of number of times the adjusted p-values 
-are less than 0.1 (and the genes would end up in the significant set).
-
-```{r message=FALSE}
-library(dplyr) 
-sim.tab <- sim.dat %>% group_by(mean, abs.LFC) %>% summarize(power=mean(sig))
-```
-
-Plotting these power curves, we can see that the power is low for genes 
-with small absolute LFC and genes with small mean count. To achieve
-75% power for detection, the log2 fold change for a gene with mean count
-in the range 10-100 needs to be greater than 1.
-
-```{r power, fig.width=7, fig.height=4}
-ggplot(sim.tab, aes(x=abs.LFC, y=power, col=mean, group=mean)) + geom_line()
-```
-
-While we have our dispersion-mean function, we can see how DESeq2
-performs when many of the genes are *null*, that is the log2 fold
-change is exactly equal to 0. We simulate another dataset,
-with 80% of null genes and a wider spread of mean counts.
-
-```{r}
-de <- rep(c(FALSE,TRUE),c(8000,2000))
-set.seed(1)
-sim2 <- makeExampleDESeqDataSet(n=10000, m=12,
-                                betaSD=ifelse(de,1,0),
-                                interceptMean=6,
-                                interceptSD=3,
-                                dispMeanRel=dmr)
-sim2 <- DESeq(sim2)
-```
-
-We can then see how many null genes end up in FDR sets at
-increasing cutoffs.
-
-```{r}
-threshold <- c(1,5,10,15,20)/100
-FDR <- sapply(threshold, function(t) {
-  sim2.res <- results(sim2, alpha=t)
-  sig <- which(sim2.res$padj < t)
-  mean(!de[sig])
-})
-```
-
-The rate of null genes is roughly on target with the 
-*nominal* amount, that is, the amount of false discovery
-rate we asked for.
-
-```{r simfdr}
-plot(threshold, FDR, ylim=c(0,.3), type="b", col="blue",
-     main="Sim: empirical vs nominal FDR")
-abline(0,1)
-```
-
-We can also do a quick power and precision analysis of 
-DESeq2 calls using the highly replicated yeast RNA-seq dataset of 
-[Schurch et al.](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4878611/).
-This dataset, designed for benchmarking RNA-seq for power analysis,
-has more than 40 biological replicates in two condition, one of 
-wild type yeast and a mutant strain, *Δsnf2*.
-
-```{r}
-load("../data/yeast.rda")
-dim(yeast)
-table(yeast$condition)
-```
-
-We can compare an analysis with 5 samples randomly drawn from each group,
-with the results from running an analysis on the held-out samples. We would
-expect that with 37-39 samples in the held-out set, we are close to finding 
-all the differentially expressed genes, and so this can be considered a 
-"gold standard" set.
-
-```{r}
-n <- 5
-set.seed(1)
-idx <- c(sample(which(yeast$condition == "WT"), n),
-         sample(which(yeast$condition == "mut"), n))
-yeast.in <- yeast[,idx]
-yeast.out <- yeast[,-idx]
-yeast.in <- DESeq(yeast.in)
-yeast.out <- DESeq(yeast.out)
-```
-
-The mutation in this experiment results in the majority of genes having small, 
-statistically significant fold changes, so it's a bit too easy 
-if we would look to see which genes are common across the two
-analyses. We will require that the log2 fold changes show statistical
-evidence of being larger than 1 in absolute value. And we will
-require that a low FDR cutoff in the held-out set, 1%, because we 
-think that we have sufficient replicates (37-39), to have sufficient power
-to detect these genes.
-
-```{r}
-res.in <- results(yeast.in, lfcThreshold=1, alpha=.1)
-res.out <- results(yeast.out, lfcThreshold=1, alpha=.01)
-res.out$padj[is.na(res.out$padj)] <- 1 # set NA to 1
-de <- res.out$padj < .01 # consider 'out' with 1% FDR as 'truth'
-prop.table(table(test=res.in$padj < .1, de),1)
-```
-
-We can look to see how many genes in the subset are called at various
-FDR thresholds, and then we calculate the number of "null" genes,
-that is, genes which do not show statistical evidence of having an LFC
-larger than 1 in absolute value in the held-out set:
-
-```{r}
-sapply(threshold, function(t) {
-  res.in <- results(yeast.in, lfcThreshold=1, alpha=t)
-  sum(res.in$padj < t, na.rm=TRUE)
-})
-FDR <- sapply(threshold, function(t) {
-  res.in <- results(yeast.in, lfcThreshold=1, alpha=t)
-  sig <- which(res.in$padj < t)
-  mean(!de[sig])
-})
-```
-
-From this analysis, DESeq2 is close to the target for
-low cutoffs, but then as we build larger sets with higher
-cutoff values, we have lower FDR than nominal for the test of 
-LFC greater than 1.
-
-```{r yeastfdr}
-plot(threshold, FDR, ylim=c(0,.3), type="b", col="blue",
-     main="High replicate yeast: empirical vs nominal FDR")
-abline(0,1)
-```
-
 # Other differential analyses
 
 Now that we've taken a look at how power depends on effect size and mean count 
@@ -832,17 +728,6 @@ we will chop the name at 60 characters.
 The biological processes have names like "inflamation response", "immune response",
 "response to cold", and "defense response to virus", which make sense.
 
-A statistical rigorous approach, if we didn't have any terms in mind, would
-be to perform a *battery* of statistical tests of all GO biological process 
-terms. Sometimes, you might consider all GO terms within a range by size, 
-e.g. GO BP terms with >= 10 and <= 500 genes.
-
-Some packages and functions for performing gene set testing are 
-[goseq](http://bioconductor.org/packages/goseq),
-*roast*, and *camera*, the last two which are in the 
-[limma](http://bioconductor.org/packages/limma) 
-package.
-
 ```{r}
 library(GO.db)
 go.tab2 <- GO.db %>% AnnotationDbi::select(go.tab$GO, "TERM", "GOID")
@@ -875,71 +760,49 @@ getTerms(5)
 getTerms(6)
 ```
 
-# LFC shrinkage
+# Testing for over-represented gene sets
 
-Finally, I want to show a feature of DESeq2: the 
-Bayesian shrinkage of log2 fold changes. The utility
-of *shrunken* log2 fold changes is that, it is sometimes 
-useful to do further data analysis or visualization 
-of effect sizes, rather than converting these into Wald
-statistics (dividing by their standard error) or discretizing
-into FDR-bounded sets of differentially expressed genes.
-Some examples of such analyses are if we wanted to plot
-log2 fold change across experiments, or if we wanted to cluster
-groups of samples by log2 fold change. Applying a Bayesian
-procedure to the log2 fold changes has a number of advantages
-relative to the use of pseudocounts in moderating the extreme ratios
-one can obtain when counts are low or highly variable.
+The exploratory analysis from the previous section is useful to get an idea of the annotation of the genes that are differentially expressed. However, the appropiate way to look at this is to blindly test for over-represented gene sets among the genes that are differentially expressed as compared to a background set of genes. This statistically test, for example, if the treatment is causing the transcription of genes from a specific biological pathway. 
 
-The log2 fold change shrinkage feature 
-currently only works when the design does not contain 
-interaction terms, as we did not yet find a suitable method
-for dealing with interaction and main effects and to produce
-the effect size shrinkage. We're still working on a method
-in this area, but for now, we can use a design with just
-the condition and treatment terms (so ignoring the terms
-accounting for each subject).
+In RNA-seq, the counts of a gene are biased due to, among other things, gene length. The longer the gene, the more it is likely to have more counts and thus more power to be detected as differentially expressed. The package `goseq` is a package to test for over-representation of gene sets that is specifically designed to account for gene length biases. 
 
-```{r}
-dds3 <- removeResults(dds)
-design(dds3) <- ~condition + treatment
+We load the goseq library and prepare a vector of zeros and ones. The name of each element of the vector will correspond to a gene, such that differentially expressed genes are flagged with a one. 
+
+```{r goseq}
+library(goseq)
+genes <- as.numeric( res2$padj < 0.1 )
+names( genes ) <- rownames( res2 )
+head( genes )
 ```
 
-We re-run the pipeline, and now we use a function `lfcShrink`,
-to shrink the log2 fold change due to treatment, which 
-is the 3rd coefficient in `resultsNames`.
+We run the Probability Weighting Function from the `goseq` package, that estimates the gene length bias. The resulting plot is informative of this bias. 
 
-```{r}
-dds3 <- DESeq(dds3)
-resultsNames(dds3)
-res3 <- results(dds3, lfcThreshold=2)
-res3shr <- lfcShrink(dds3, coef=3, res=res3)
+```{r }
+pwf=nullp(genes,"hg19","ensGene")
 ```
 
-We can compare the shrunken log2 fold changes to the maximum
-likelihood log2 fold changes. We color in the genes with a normalized
-count of only 12 summing across the control samples. Here we have
-an average of just one count per sample. 
+We know use the function `goseq` to calculate a p-value for each GO cathegory, which results from testing whether a GO cathegory is over-represented among the genes that are differentially expressed. The resulting table is ranked by p-value: among the 10 GO cathegories with smaller p-values, we can see that we get terms related to immune responses. 
 
-On the right side, we can see that these genes have a reduction in their
-estimated fold change, where now the genes with higher mean normalized
-count, and therefore more statitistical information underlying
-the observed ratio, are given a bit more priority in the ranking by log2 fold change.
-Two of the genes which had a high log2 fold change previously are now near 0,
-indicating that there was very little information to justify the large log2 fold change.
-
-```{r plotma3, fig.width=8, fig.height=5}
-par(mfrow=c(1,2))
-plotMA(res3, ylim=c(-12,12))
-rs <- rowSums(counts(dds, normalized=TRUE)[,dds$treatment == "Vehicle"])
-too.low <- rs < 12
-with(res3[too.low,], points(baseMean, log2FoldChange, cex=2, col="dodgerblue"))
-plotMA(res3shr, ylim=c(-12,12))
-with(res3shr[too.low,], points(baseMean, log2FoldChange, cex=2, col="dodgerblue"))
+```{r gotest}
+GO.wall=goseq(pwf,"hg19","ensGene")
+head( GO.wall )
+head( GO.wall )
 ```
+
+# Conclusion
+
+This tutorial has guided you through an analysis of differential expression using RNA-seq data. It went from quantifying expression from raw fastq files and ended in gene set enrichment analyses that enables the generation of biological conclusions. 
 
 # Session info
 
 ```{r}
 sessionInfo()
 ```
+
+
+[RunTable]: https://trace.ncbi.nlm.nih.gov/Traces/study/?acc=SRP046226
+[SRAStudy]: https://trace.ncbi.nlm.nih.gov/Traces/sra/?study=SRP046226
+[salmonrelease]: https://github.com/COMBINE-lab/salmon/releases
+[NCBISRA]: https://www.ncbi.nlm.nih.gov/sra
+[SRAToolkit]: https://www.ncbi.nlm.nih.gov/sra/docs/toolkitsoft/
+[recount2]: https://jhubiostatistics.shinyapps.io/recount/
