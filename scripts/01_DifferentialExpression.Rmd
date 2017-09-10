@@ -44,6 +44,7 @@ download.file('ftp://ftp.sanger.ac.uk/pub/gencode/Gencode_human/release_26/genco
 download.file('ftp://ftp.sanger.ac.uk/pub/gencode/Gencode_human/release_26/gencode.v26.chr_patch_hapl_scaff.annotation.gtf.gz',destfile = "gencode.v26.chr_patch_hapl_scaff.annotation.gtf.gz", quiet=TRUE)
 ```
 
+Take your time to explore and understand these files!
 
 ## Raw reads (fastq)
 
@@ -94,13 +95,13 @@ The code below "registers" four "workers" and then extracts the first four sampl
 ```{r extractFASTQ,eval=FALSE,}
 register(MulticoreParam(multicoreWorkers()*2))
 res = bplapply(sra_run_table$Run_s, extractSRA, 
-               args = "--split-files --gzip -X 10000", outdir = "fake_fastq")
+               args = "--split-files --gzip -X 10000", outdir = "incomplete_fastq")
 ```
 
-So, if you now look in the "fake_fastq" directory, you'll see 48 files representing the forward and reverse reads for each of our 24 samples.
+So, if you now look in the "incomplete_fastq" directory, you'll see 48 files representing the forward and reverse reads for each of our 24 samples.
 
 ```{r}
-head(dir('fake_fastq'))
+head(dir('incomplete_fastq'))
 ```
 
 # Quantifying RNA-seq with Salmon
@@ -136,7 +137,7 @@ Now, we can run salmon for the 24 samples of our experiment. Note that, for illu
 Below is a wrapper function in which we provide three parameters: a sample name, the indexed transcriptome generated in the previous step and an output directory. This wrapper will construct the call to salmon, which we pass to the linux terminal using the command `system`.
 
 ```{r}
-salmon_quant <- function(samplename, index, fastqdir = 'fake_fastq') {
+salmon_quant <- function(samplename, index, fastqdir = 'incomplete_fastq') {
   cmdline = sprintf("salmon quant -i %s -1 %s/%s_1.fastq.gz -2 %s/%s_2.fastq.gz -l A -o %s/%s",
                     index, fastqdir, samplename, fastqdir, samplename, fastqdir, samplename)
   message(sprintf("running: %s\n", cmdline))
@@ -147,7 +148,7 @@ salmon_quant <- function(samplename, index, fastqdir = 'fake_fastq') {
 Now, we can run the first sample.
 
 ```{r eval=FALSE}
-salmon_quant('SRR1565929', "gencode.v26", 'fake_fastq')
+salmon_quant('SRR1565929', "gencode.v26", 'incomplete_fastq')
 ```
 
 To generalize this for all our samples, we will need to create a loop to run the `salmon_quant` function for each file.
@@ -155,15 +156,15 @@ To generalize this for all our samples, we will need to create a loop to run the
 ```{r eval=FALSE}
 for(run in sra_run_table$Run_s) {
   message("starting: ", run)
-  salmon_quant(run, 'gencode.v26', "fake_fastq")
+  salmon_quant(run, 'gencode.v26', "incomplete_fastq")
   message("finishing: ", run)
 }
 ```
 
-You will see that in the "fake_fastq" directory, there is one new directory for each sample, containing the results of the quantification step. Below, we are reading one of these files into our R session and exploring the first elements of it. Notice that there is an unusually high number of low  counts: this is because we only used a very small subset of the data!
+You will see that in the "incomplete_fastq" directory, there is one new directory for each sample, containing the results of the quantification step. Below, we are reading one of these files into our R session and exploring the first elements of it. Notice that there is an unusually high number of low  counts: this is because we only used a very small subset of the data!
 
 ```{r salmonResults, eval=FALSE}
-dat = read.table('fake_fastq/SRR1565929/quant.sf')
+dat = read.table('incomplete_fastq/SRR1565929/quant.sf')
 head(dat)
 ```
 
@@ -216,12 +217,9 @@ read in the GTF file from the same database that we used for building
 the Salmon index (in this case, Gencode version 26), and then pull
 out a table with the transcript name for every gene.
 
-```{r eval=FALSE}
+```{r}
 library(GenomicFeatures)
 txdb <- makeTxDbFromGFF("gencode.v26.chr_patch_hapl_scaff.annotation.gtf.gz")
-#saveDb(txdb, file="gencode.v26.sqlite")
-# next time you can just load with this line (no need to makeTxDb...)
-# txdb <- loadDb("gencode.v26.sqlite") 
 columns(txdb)
 k <- keys(txdb, "GENEID")
 res <- AnnotationDbi::select(txdb, k, "TXNAME", "GENEID")
