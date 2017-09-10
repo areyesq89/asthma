@@ -64,7 +64,7 @@ The following function:
 
 ```{r}
 extractSRA <- function(sra_accession,
-                       exe_path = 'fastq-dump',
+                       exe_path = 'fastq-dump.2.8.2',
                        args = '--split-files --gzip',
                        outdir = 'fastq',
                        dry_run = FALSE) 
