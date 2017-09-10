@@ -121,13 +121,13 @@ Use the salmon software to first [create the index](http://salmon.readthedocs.io
 # 
 # Use the salmon help (salmon index --help) to determing
 # what the next line does.
-salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 4
+salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 1
 ```
 
 If we want to do the same thing directly from R, we simply need to wrap  the command lines in `system()`.
 
 ```{r eval=FALSE}
-system("salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 4")
+system("salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 1")
 ```
 
 ## Quantifying using salmon
