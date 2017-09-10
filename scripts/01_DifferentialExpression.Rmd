@@ -92,8 +92,8 @@ library(BiocParallel)
 
 The code below "registers" four "workers" and then extracts the first four samples worth of fastq files *at the same time*, or in parallel. Note that bplapply works very similarly to lapply except that the work is done in chunks of four at a time (or whatever the number of workers is). To keep things fast, we pass the parameter `-X 10000` to `fastq-dump` to generate only 10000 reads for each fastq file. 
 
-```{r extractFASTQ,eval=FALSE,}
-register(MulticoreParam(multicoreWorkers()*2))
+```{r extractFASTQ,eval=FALSE}
+#register(MulticoreParam(multicoreWorkers()))
 res = bplapply(sra_run_table$Run_s, extractSRA, 
                args = "--split-files --gzip -X 10000", outdir = "incomplete_fastq")
 ```
