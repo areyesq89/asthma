@@ -75,7 +75,8 @@ extractSRA <- function(sra_accession,
     } else {
       return(system(cmdline))
     }
-  }
+}
+
 ```
 
 To give the function a try, we can execute the function as a "dry run", which will only give us the resulting command line, but will not have the computer execute it.
@@ -96,6 +97,7 @@ The code below "registers" four "workers" and then extracts the first four sampl
 #register(MulticoreParam(multicoreWorkers()))
 res = bplapply(sra_run_table$Run_s, extractSRA, 
                args = "--split-files --gzip -X 10000", outdir = "incomplete_fastq")
+
 ```
 
 So, if you now look in the "incomplete_fastq" directory, you'll see 48 files representing the forward and reverse reads for each of our 24 samples.
@@ -121,7 +123,7 @@ Use the salmon software to first [create the index](http://salmon.readthedocs.io
 # 
 # Use the salmon help (salmon index --help) to determing
 # what the next line does.
-salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 1
+osalmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 1
 ```
 
 If we want to do the same thing directly from R, we simply need to wrap  the command lines in `system()`.
@@ -130,9 +132,17 @@ If we want to do the same thing directly from R, we simply need to wrap  the com
 system("salmon index -i gencode.v26 -t gencode.v26.transcripts.fa.gz -p 1")
 ```
 
+If the command above get's killed without finishing, it is likely that the Amazon instances for this course 
+do not have the computing resoures needed to build this index. In case you get an error, we have precomputed this index file and you can download it by using the linux `wget` command. Wrapped into a system call from within R, it looks like this:
+
+```{r, eval=FALSE}
+system("wget https://www.dropbox.com/s/obncwbzkd1upnxq/genecode.v26.tar.gz")
+system("tar -xzvf genecode.v26.tar.gz")
+```
+
 ## Quantifying using salmon
 
-Now, we can run salmon for the 24 samples of our experiment. Note that, for illustration purposes, we are running our quantifications using fastq files that contain only 10,000 reads. Thus the results of the quantifications will probably not representative of the whole dataset. However, the quantifications using the whole dataset are already available in the directory named 'data' of this repository. 
+Now, we can run salmon to quantify the abundance of genes for the 24 samples of our experiment. Note that, for illustration purposes, we are running our quantifications using fastq files that contain only 10,000 reads. Thus the results of the quantifications will probably not representative of the whole dataset. However, the quantifications using the whole dataset are already available in the directory named 'data' of this repository. 
 
 Below is a wrapper function in which we provide three parameters: a sample name, the indexed transcriptome generated in the previous step and an output directory. This wrapper will construct the call to salmon, which we pass to the linux terminal using the command `system`.
 
